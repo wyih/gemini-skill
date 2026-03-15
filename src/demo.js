@@ -7,18 +7,18 @@
  *   chrome --remote-debugging-port=9222 --user-data-dir="~/.gemini-skill/chrome-data"
  *   node src/demo.js
  *
- * 方式 2：让 skill 自动启动 Chrome
+ * 方式 2：通过环境变量让 skill 自动启动 Chrome
  *   CHROME_PATH="C:/Program Files/Google/Chrome/Application/chrome.exe" node src/demo.js
+ *
+ * 所有配置项见 .env，可直接编辑或通过命令行设环境变量。
  */
 import { createGeminiSession, disconnect } from './index.js';
 
 async function main() {
   console.log('=== Gemini Skill Demo ===\n');
 
-  // 创建会话（自动 connect 或 launch）
-  const { ops } = await createGeminiSession({
-    executablePath: process.env.CHROME_PATH || undefined,
-  });
+  // 创建会话（配置自动从环境变量读取，也可以传 opts 覆盖）
+  const { ops } = await createGeminiSession();
 
   try {
     // 1. 探测页面状态

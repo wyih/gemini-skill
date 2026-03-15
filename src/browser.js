@@ -14,9 +14,8 @@
 import puppeteerCore from 'puppeteer-core';
 import { addExtra } from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { createConnection } from 'node:net';
+import config from './config.js';
 
 // ── 用 puppeteer-extra 包装 puppeteer-core，注入 stealth 插件 ──
 const puppeteer = addExtra(puppeteerCore);
@@ -24,14 +23,6 @@ puppeteer.use(StealthPlugin());
 
 // ── 模块级单例：跨调用复用同一个浏览器 ──
 let _browser = null;
-
-/** 默认配置 */
-const DEFAULTS = {
-  port: 9222,
-  userDataDir: join(homedir(), '.gemini-skill', 'chrome-data'),
-  headless: false,
-  protocolTimeout: 60_000,
-};
 
 /**
  * 探测指定端口是否有 Chrome 在监听
@@ -99,7 +90,7 @@ async function connectToChrome(port) {
   const browser = await puppeteer.connect({
     browserURL,
     defaultViewport: null,
-    protocolTimeout: DEFAULTS.protocolTimeout,
+    protocolTimeout: config.chromeProtocolTimeout,
   });
   console.log('[browser] connected to existing Chrome on port', port);
   return browser;
@@ -125,7 +116,7 @@ async function launchChrome({ executablePath, port, userDataDir, headless }) {
       `--remote-debugging-port=${port}`,
     ],
     ignoreDefaultArgs: ['--enable-automation'],
-    protocolTimeout: DEFAULTS.protocolTimeout,
+    protocolTimeout: config.chromeProtocolTimeout,
   });
   console.log('[browser] launched Chrome, pid:', browser.process()?.pid, 'port:', port, 'dataDir:', userDataDir);
   return browser;
@@ -176,10 +167,10 @@ async function findOrCreateGeminiPage(browser) {
  */
 export async function ensureBrowser(opts = {}) {
   const {
-    executablePath,
-    port = DEFAULTS.port,
-    userDataDir = DEFAULTS.userDataDir,
-    headless = DEFAULTS.headless,
+    executablePath = config.chromePath,
+    port = config.chromeDebugPort,
+    userDataDir = config.chromeUserDataDir,
+    headless = config.chromeHeadless,
   } = opts;
 
   // 1. 复用已有连接

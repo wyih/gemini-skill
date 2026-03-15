@@ -23,11 +23,13 @@ export { disconnect, close };
  *   2. 无 Chrome + 提供了 executablePath → 自动 launch
  *   3. 无 Chrome + 无 executablePath → 报错并提示手动启动
  *
+ * 所有参数均可通过环境变量配置（见 .env），opts 传参优先级更高。
+ *
  * @param {object} [opts]
- * @param {string} [opts.executablePath] - Chrome 路径（可选，仅自动启动时需要）
- * @param {number} [opts.port=9222] - 调试端口
- * @param {string} [opts.userDataDir] - 用户数据目录（默认 ~/.gemini-skill/chrome-data）
- * @param {boolean} [opts.headless=false]
+ * @param {string} [opts.executablePath] - Chrome 路径（env: CHROME_PATH）
+ * @param {number} [opts.port] - 调试端口（env: CHROME_DEBUG_PORT，默认 9222）
+ * @param {string} [opts.userDataDir] - 用户数据目录（env: CHROME_USER_DATA_DIR）
+ * @param {boolean} [opts.headless] - 无头模式（env: CHROME_HEADLESS，默认 false）
  * @returns {Promise<{ops: ReturnType<typeof createOps>, page: import('puppeteer-core').Page, browser: import('puppeteer-core').Browser}>}
  */
 export async function createGeminiSession(opts = {}) {
