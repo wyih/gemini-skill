@@ -1,0 +1,24 @@
+{
+  "name": "gemini-skill",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "demo": "node src/demo.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "gemini",
+    "cdp",
+    "puppeteer",
+    "ai-image-generation"
+  ],
+  "author": "",
+  "license": "ISC",
+  "description": "通过 CDP 操控 Gemini 网页进行 AI 问答与生图",
+  "dependencies": {
+    "puppeteer-core": "^24.39.1",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}
