@@ -95,50 +95,6 @@ const SELECTORS = {
 export function createOps(page) {
   const op = createOperator(page);
 
-  // ── 图片请求缓存 map：URL → { requestId, ts } ──
-  // 监听 Network.responseReceived，收集图片请求的 requestId，
-  // 供 extractImageBase64 的 getResponseBody 缓存阶段使用。
-  // 每条缓存 TTL 5 分钟，过期后 getResponseBody 大概率也失效。
-  const IMAGE_CACHE_TTL = 5 * 60 * 1000; // 5 min
-  const imageRequestMap = new Map();
-
-  function setImageRequest(url, requestId) {
-    //  先处理url已存在的情况，这个时候取消掉url的定时器
-    if(imageRequestMap.has(url)) {
-      const entry = imageRequestMap.get(url);
-      clearTimeout(entry.timer);
-    }
-    const timer = setTimeout(() => {
-      imageRequestMap.delete(url);
-    }, IMAGE_CACHE_TTL);
-    timer.unref();//  这个方法可以防止定时器影响进程退出
-    imageRequestMap.set(url, {
-      requestId,
-      timer: timer,
-    });
-  }
-
-  function getImageRequestId(url) {
-    const entry = imageRequestMap.get(url);
-    return entry ? entry.requestId : null;
-  }
-
-  (async () => {
-    try {
-      const client = page._client();
-      await client.send('Network.enable');
-      client.on('Network.responseReceived', (params) => {
-        const { requestId, response } = params;
-        const mime = response.mimeType || '';
-        if (mime.startsWith('image/')) {
-          setImageRequest(response.url, requestId);
-        }
-      });
-    } catch (e) {
-      console.warn('[ops] Network 监听初始化失败（不影响核心功能）:', e.message);
-    }
-  })();
-
   return {
     /** 暴露底层 operator，供高级用户直接使用 */
     operator: op,
@@ -278,7 +234,7 @@ export function createOps(page) {
       }
 
       // 2. 等待菜单动画展开
-      await sleep(800);
+      await sleep(250);
 
       // 3. 点击目标模型选项
       const selectResult = await op.click(targetSels);
@@ -535,14 +491,13 @@ export function createOps(page) {
     /**
      * 提取指定图片的 Base64 数据
      *
-     * 四级降级策略：
-     *   1. Canvas — 同步提取，最快（但跨域图片会被 taint）
-     *   2. 页面 fetch — 异步读取 blob（受 CORS 限制，Google 图片通常不可用）
-     *   3. CDP getResponseBody — 从浏览器内存缓存读取，零网络开销（需要 requestId 命中）
-     *   4. CDP loadNetworkResource — 通过 CDP 协议用浏览器网络栈重新下载，绕过 CORS，终极兜底
+     * 降级策略：
+     *   1. Canvas — 同步提取，最快（但跨域图片会被 taint）【已注释，留作参考】
+     *   2. 页面 fetch — 异步读取 blob（受 CORS 限制，Google 图片通常不可用）【已注释，留作参考】
+     *   3. CDP loadNetworkResource — 通过 CDP 协议用浏览器网络栈下载，绕过 CORS
      *
      * @param {string} url - 目标图片的 src URL
-     * @returns {Promise<{ok: boolean, dataUrl?: string, width?: number, height?: number, method?: 'canvas'|'fetch'|'cdp-cache'|'cdp', error?: string}>}
+     * @returns {Promise<{ok: boolean, dataUrl?: string, method?: 'cdp', error?: string}>}
      */
     async extractImageBase64(url) {
       if (!url) {
@@ -612,26 +567,7 @@ export function createOps(page) {
 
       // console.log(`[extractImageBase64] ⚠ 页面 fetch 失败 (${fetchResult.error}${fetchResult.detail ? ' — ' + fetchResult.detail : ''})，尝试 CDP 缓存读取...`);
 
-      // ── 阶段 3: CDP Network.getResponseBody（从浏览器内存缓存读取，零网络开销） ──
-      const requestId = getImageRequestId(canvasResult.src);
-      if (requestId) {
-        try {
-          const client = page._client();
-          const { body, base64Encoded } = await client.send('Network.getResponseBody', { requestId });
-          const base64Data = base64Encoded ? body : Buffer.from(body, 'utf8').toString('base64');
-          const mime = 'image/png'; // 缓存中无法直接拿 MIME，用 png 兜底
-          const dataUrl = `data:${mime};base64,${base64Data}`;
-
-          console.log(`[extractImageBase64] ✅ CDP 缓存命中 (${canvasResult.width}x${canvasResult.height}, size=${(base64Data.length * 0.75 / 1024).toFixed(1)}KB)`);
-          return { ok: true, dataUrl, width: canvasResult.width, height: canvasResult.height, method: 'cdp-cache' };
-        } catch (e) {
-          console.log(`[extractImageBase64] ⚠ CDP 缓存读取失败 (${e.message})，降级为 CDP 网络请求...`);
-        }
-      } else {
-        console.log('[extractImageBase64] ⚠ 缓存中无该 URL 的 requestId，降级为 CDP 网络请求...');
-      }
-
-      // ── 阶段 4: CDP Network.loadNetworkResource（终极兜底，重新发请求，绕过 CORS） ──
+      // ── CDP Network.loadNetworkResource（通过 CDP 发请求，绕过 CORS） ──
       try {
         const client = page._client();
         const frameId = page.mainFrame()._id;
@@ -639,7 +575,7 @@ export function createOps(page) {
         console.log(`[extractImageBase64] 📡 CDP 请求中... frameId=${frameId}`);
         const { resource } = await client.send('Network.loadNetworkResource', {
           frameId,
-          url: canvasResult.src,
+          url,
           options: { disableCache: false, includeCredentials: true },
         });
 
@@ -675,8 +611,8 @@ export function createOps(page) {
         const mime = (resource.headers?.['content-type'] || resource.headers?.['Content-Type'] || 'image/png').split(';')[0].trim();
         const dataUrl = `data:${mime};base64,${base64Full}`;
 
-        console.log(`[extractImageBase64] ✅ CDP 提取成功 (${canvasResult.width}x${canvasResult.height}, mime=${mime}, size=${(base64Full.length * 0.75 / 1024).toFixed(1)}KB)`);
-        return { ok: true, dataUrl, width: canvasResult.width, height: canvasResult.height, method: 'cdp' };
+        console.log(`[extractImageBase64] ✅ CDP 提取成功 (mime=${mime}, size=${(base64Full.length * 0.75 / 1024).toFixed(1)}KB)`);
+        return { ok: true, dataUrl, method: 'cdp' };
       } catch (err) {
         const errMsg = err.message || String(err);
         console.warn(`[extractImageBase64] ❌ CDP 提取异常: ${errMsg}`);

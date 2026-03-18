@@ -5,6 +5,7 @@
   "main": "src/index.js",
   "scripts": {
     "demo": "node src/demo.js",
+    "daemon": "node src/daemon/server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
