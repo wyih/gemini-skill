@@ -43,10 +43,17 @@ server.registerTool(
         };
       }
       // 需要先处理新建会话（如果需要），因为 generateImage 内部的 newChat 会在上传之后才执行
-        if (newSession) {
+      if (newSession) {
           await ops.click('newChatBtn');
           await sleep(250);
-        }
+      }
+
+      // 确保是pro会话
+      const modelCheck = await ops.checkModel();
+      if (!modelCheck.ok || modelCheck.model !== 'pro') {
+        await ops.switchToModel('pro');
+        console.error(`[mcp] 已切换至 pro 模型`);
+      }
 
       // 如果有参考图，先上传
       if (referenceImages.length > 0) {
