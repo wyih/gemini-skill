@@ -8,7 +8,8 @@
 import { createOperator } from './operator.js';
 import { sleep } from './util.js';
 import config from './config.js';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, existsSync } from 'node:fs';
+import { resolve as pathResolve, normalize as pathNormalize } from 'node:path';
 import { removeWatermarkFromFile, removeWatermarkFromDataUrl } from './watermark-remover.js';
 
 // ── Gemini 页面元素选择器 ──
@@ -923,6 +924,13 @@ export function createOps(page) {
      */
     async uploadImage(filePath) {
       try {
+        // 路径规范化（兼容 Windows 反斜杠、混合斜杠等）
+        filePath = pathResolve(pathNormalize(filePath));
+
+        if (!existsSync(filePath)) {
+          return { ok: false, error: 'file_not_found', detail: `文件不存在: ${filePath}` };
+        }
+
         // 1. 点击加号面板按钮，展开上传菜单
         const panelClick = await this.click('uploadPanelBtn');
         if (!panelClick.ok) {
@@ -934,7 +942,7 @@ export function createOps(page) {
 
         // 3. Promise.all 是精髓：一边开始监听文件选择器弹窗，一边点击"上传文件"按钮
         const [fileChooser] = await Promise.all([
-          page.waitForFileChooser({ timeout: 3_000 }),
+          page.waitForFileChooser({ timeout: 5_000 }),
           this.click('uploadFileBtn'),
         ]);
 
@@ -943,8 +951,8 @@ export function createOps(page) {
         console.log(`[ops] 文件已塞入，等待 Gemini 加载图片...`);
 
         // 5. 等待图片加载完成（.image-preview.loading 消失）
-        const loadTimeout = 10_000;
-        const loadInterval = 250;
+        const loadTimeout = 15_000;
+        const loadInterval = 500;
         const loadStart = Date.now();
         await sleep(500); //  短暂等待 UI 响应
         while (Date.now() - loadStart < loadTimeout) {
@@ -953,7 +961,7 @@ export function createOps(page) {
             return !!el;
           });
           if (!loading) {
-            console.log(`[ops] 图片加载完成 (${Date.now() - loadStart}ms): ${filePath}`);
+            console.log(`[ops] 图片上传成功 (${Date.now() - loadStart}ms): ${filePath}`);
             return { ok: true, elapsed: Date.now() - loadStart };
           }
           await sleep(loadInterval);

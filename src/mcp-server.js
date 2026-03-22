@@ -48,16 +48,18 @@ server.registerTool(
           isError: true,
         };
       }
+      // 检查是否需要新建会话
+      if (newSession) {
+        await ops.click('newChatBtn');
+        await sleep(250);
+      }
 
       // 确保是 pro 模型（生图需要 Pro）
       await ops.ensureModelPro();
 
-      // 如果有参考图，需要先新建会话再上传，最后 generateImage 不再新建
+      // 如果有参考图，需要上传参考图
       if (referenceImages.length > 0) {
-        if (newSession) {
-          await ops.click('newChatBtn');
-          await sleep(250);
-        }
+
         for (const imgPath of referenceImages) {
           console.error(`[mcp] 正在上传参考图: ${imgPath}`);
           const uploadResult = await ops.uploadImage(imgPath);

@@ -34,13 +34,13 @@ async function main() {
 
   try {
     // 1. 进入临时会话（不留聊天记录，保持账号干净）
-    console.log('[1] 进入临时会话...');
-    const tempResult = await ops.clickTempChat();
-    if (!tempResult.ok) {
-      console.warn('[1] 临时会话按钮未找到，跳过（可能已在临时模式或页面结构变化）');
-    } else {
-      console.log('[1] 已进入临时会话');
-    }
+    // console.log('[1] 进入临时会话...');
+    // const tempResult = await ops.clickTempChat();
+    // if (!tempResult.ok) {
+    //   console.warn('[1] 临时会话按钮未找到，跳过（可能已在临时模式或页面结构变化）');
+    // } else {
+    //   console.log('[1] 已进入临时会话');
+    // }
 
     // 2. 探测页面状态
     console.log('\n[2] 探测页面元素...');
