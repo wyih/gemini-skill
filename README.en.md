@@ -1,3 +1,4 @@
+## Automate Gemini web via CDP — AI image generation, conversations, image extraction, and more.
 <!-- PROJECT SHIELDS -->
 
 <div align="center">
@@ -37,7 +38,6 @@
 <h1 align="center">Gemini Skill</h1>
 
 <p align="center">
-  Automate Gemini web via CDP — AI image generation, conversations, image extraction, and more.
   <br><br>
   <a href="#-usage">Quick Start</a>
   ·

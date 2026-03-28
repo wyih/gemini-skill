@@ -1,3 +1,4 @@
+## 通过 CDP 操控 Gemini 网页版，实现 AI 生图、对话、图片提取等自动化操作。
 <!-- PROJECT SHIELDS -->
 
 <div align="center">
@@ -37,7 +38,6 @@
 <h1 align="center">Gemini Skill</h1>
 
 <p align="center">
-  通过 CDP 操控 Gemini 网页版，实现 AI 生图、对话、图片提取等自动化操作。
   <br><br>
   <a href="#-使用">快速开始</a>
   ·
