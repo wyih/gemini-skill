@@ -50,7 +50,7 @@ server.registerTool(
       referenceImages: z.array(z.string()).default([]).describe(
         "参考图片的本地文件路径数组，例如 [\"/path/to/ref1.png\", \"/path/to/ref2.jpg\"]。图片会在发送 prompt 前上传到 Gemini 输入框"
       ),
-      fullSize: z.boolean().default(false).describe(
+      fullSize: z.boolean().default(true).describe(
         "是否下载完整尺寸原图。true= 通过 CDP 拦截下载高清大图; false= 提取页面预览图"
       ),
       timeout: z.number().default(180000).describe(
