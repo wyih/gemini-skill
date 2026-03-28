@@ -38,7 +38,6 @@
 <h1 align="center">Gemini Skill</h1>
 
 <p align="center">
-  <br><br>
   <a href="#-usage">Quick Start</a>
   ·
   <a href="https://github.com/WJZ-P/gemini-skill/issues">Report Bug</a>
