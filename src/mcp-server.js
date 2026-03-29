@@ -4,18 +4,8 @@ import { z } from "zod";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-// ─── stdio 保护：拦截所有 stdout 写入，强制走 stderr ───
-// 必须放在 import 之后、业务代码之前
-// ES module 的 import 会被提升，所以用 console 重定向 + stdout.write 双保险
-const _origStdoutWrite = process.stdout.write.bind(process.stdout);
-process.stdout.write = function (chunk, encoding, callback) {
-  // 只放行 JSON-RPC 消息（以 { 开头的行），其他全部重定向到 stderr
-  const str = typeof chunk === 'string' ? chunk : chunk.toString();
-  if (str.trimStart().startsWith('{')) {
-    return _origStdoutWrite(chunk, encoding, callback);
-  }
-  return process.stderr.write(chunk, encoding, callback);
-};
+// ─── stdio 保护：保留 MCP transport 的 stdout，业务日志统一走 stderr ───
+// 不能劫持 process.stdout.write；MCP 需要通过 stdout 发送 Content-Length 头和 JSON body。
 console.log = console.error;
 console.warn = console.error;
 console.info = console.error;
@@ -97,12 +87,6 @@ server.registerTool(
         console.error(`[mcp] ${referenceImages.length} 张参考图上传完成`);
       }
 
-
-      // 新建会话（如需）
-      if (newSession) {
-        await ops.click('newChatBtn');
-        await sleep(250);
-      }
 
       const result = await ops.generateImage(prompt, { fullSize, timeout });
 
@@ -246,24 +230,26 @@ server.registerTool(
   {
     description: `向 Gemini 发送文本消息并等待回答完成（不提取图片，纯文本交互）。
 
+默认会在发送前确保当前模型是 Pro。若你明确需要 Quick / Think，可传 model 覆盖。
+
 【长耗时工具】同步阻塞等待 Gemini 回复完毕才返回。典型耗时 10~60 秒，必须等到最终结果再回传用户。
 【返回值】直接返回 Gemini 的回复文本内容，无需再调用 gemini_get_latest_text_response。`,
     inputSchema: {
       message: z.string().describe("要发送给 Gemini 的文本内容"),
       timeout: z.number().default(120000).describe("等待回答完成的超时时间（毫秒），默认 120000"),
+      model: z.enum(["pro", "quick", "think"]).default("pro").describe("发送前确保选中的模型，默认 pro"),
     },
   },
-  async ({ message, timeout }) => {
+  async ({ message, timeout, model }) => {
     try {
       const { ops } = await createGeminiSession();
-      const result = await ops.sendAndWait(message, { timeout });
+      const result = await ops.sendAndWait(message, { timeout, model });
       disconnect();
 
       if (!result.ok) {
         return { content: [{ type: "text", text: `发送失败: ${result.error}，耗时 ${result.elapsed}ms` }], isError: true };
       }
 
-      // 直接返回 Gemini 的回复内容
       const replyText = result.text || '（未能提取到回复文本）';
       return {
         content: [{ type: "text", text: replyText }],
@@ -274,7 +260,7 @@ server.registerTool(
   }
 );
 
-// ─── 图片上传 ───
+// ─── 附件上传 ───
 
 server.registerTool(
   "gemini_upload_images",
@@ -290,8 +276,8 @@ server.registerTool(
 
       const results = [];
       for (const imgPath of images) {
-        console.error(`[mcp] 正在上传: ${imgPath}`);
-        const r = await ops.uploadImage(imgPath);
+        console.error(`[mcp] 正在上传图片: ${imgPath}`);
+        const r = await ops.uploadFile(imgPath, { kind: 'image' });
         results.push({ path: imgPath, ...r });
         if (!r.ok) {
           disconnect();
@@ -305,6 +291,42 @@ server.registerTool(
       disconnect();
       return {
         content: [{ type: "text", text: `全部 ${images.length} 张图片上传成功` }],
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `执行崩溃: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+server.registerTool(
+  "gemini_upload_files",
+  {
+    description: "向 Gemini 当前输入框上传文件附件（仅上传，不发送消息），适合 PDF、TXT、Markdown 等非图片文件，也可上传任意 Gemini 当前接受的本地文件",
+    inputSchema: {
+      files: z.array(z.string()).min(1).describe("本地文件路径数组"),
+    },
+  },
+  async ({ files }) => {
+    try {
+      const { ops } = await createGeminiSession();
+
+      const results = [];
+      for (const filePath of files) {
+        console.error(`[mcp] 正在上传附件: ${filePath}`);
+        const r = await ops.uploadFile(filePath);
+        results.push({ path: filePath, ...r });
+        if (!r.ok) {
+          disconnect();
+          return {
+            content: [{ type: "text", text: `上传失败: ${filePath}\n错误: ${r.error}\n\n已成功上传 ${results.filter(x => x.ok).length}/${files.length} 个附件` }],
+            isError: true,
+          };
+        }
+      }
+
+      disconnect();
+      return {
+        content: [{ type: "text", text: `全部 ${files.length} 个附件上传成功` }],
       };
     } catch (err) {
       return { content: [{ type: "text", text: `执行崩溃: ${err.message}` }], isError: true };

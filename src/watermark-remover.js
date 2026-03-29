@@ -1,37 +1,24 @@
 /**
  * watermark-remover.js — Gemini 图片水印移除
  *
- * 基于反向 Alpha 混合算法，精确还原被 Gemini 添加水印的图片。
+ * 这一版保留原来的反向 Alpha 混合核心，
+ * 但把水印定位升级成“候选搜索 + 验证后再动手”。
  *
- * 算法移植自 gemini-watermark-remover（by journey-ad / Jad）
- * 原始仓库：https://github.com/journey-ad/gemini-watermark-remover
- * 许可证：MIT - Copyright (c) 2025 Jad
- *
- * 原理：
- *   Gemini 水印叠加公式: watermarked = α × 255 + (1 - α) × original
- *   反向求解:            original = (watermarked - α × 255) / (1 - α)
+ * 算法来源：
+ * - reverse alpha blending 改编自 journey-ad / Jad 的 gemini-watermark-remover
+ * - 候选搜索、验证、官方尺寸目录改编自 GargantuaX 的 gemini-watermark-remover
  */
 import sharp from 'sharp';
 import { readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { interpolateAlphaMap } from './watermark-vendor/core/adaptiveDetector.js';
+import { processWatermarkImageData } from './watermark-vendor/core/watermarkProcessor.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const BASE_ALPHA_SIZES = new Set([48, 96]);
+const alphaMapCache = new Map();
 
-// ── 常量 ──
-const ALPHA_THRESHOLD = 0.002; // 忽略极小的 alpha 值（噪声）
-const MAX_ALPHA = 0.99;        // 避免除以接近零的值
-const LOGO_VALUE = 255;        // 白色水印的颜色值
-
-// ── Alpha Map 缓存 ──
-const alphaMapCache = {};
-
-/**
- * 从水印背景捕获图中计算 Alpha Map
- * @param {Buffer} pngBuffer - 水印背景捕获图的 PNG 数据
- * @param {number} size - 水印尺寸（48 或 96）
- * @returns {Promise<Float32Array>} alpha 值数组（0.0 ~ 1.0）
- */
 async function calculateAlphaMap(pngBuffer, size) {
   const { data, info } = await sharp(pngBuffer)
     .resize(size, size)
@@ -41,245 +28,207 @@ async function calculateAlphaMap(pngBuffer, size) {
 
   const pixelCount = info.width * info.height;
   const alphaMap = new Float32Array(pixelCount);
-  const channels = info.channels; // 4 (RGBA)
+  const channels = info.channels;
 
   for (let i = 0; i < pixelCount; i++) {
     const idx = i * channels;
     const r = data[idx];
     const g = data[idx + 1];
     const b = data[idx + 2];
-    // 取 RGB 三通道最大值归一化
     alphaMap[i] = Math.max(r, g, b) / 255.0;
   }
 
   return alphaMap;
 }
 
-/**
- * 获取指定尺寸的 Alpha Map（带缓存）
- * @param {number} size - 48 或 96
- * @returns {Promise<Float32Array>}
- */
-async function getAlphaMap(size) {
-  if (alphaMapCache[size]) return alphaMapCache[size];
+async function loadBaseAlphaMap(size) {
+  if (!BASE_ALPHA_SIZES.has(size)) {
+    throw new Error(`unsupported_base_alpha_size:${size}`);
+  }
+  if (alphaMapCache.has(size)) {
+    return alphaMapCache.get(size);
+  }
 
   const bgFile = size === 48 ? 'bg_48.png' : 'bg_96.png';
   const bgPath = join(__dirname, 'assets', bgFile);
-  const bgBuffer = readFileSync(bgPath);
-
-  const alphaMap = await calculateAlphaMap(bgBuffer, size);
-  alphaMapCache[size] = alphaMap;
+  const alphaMap = await calculateAlphaMap(readFileSync(bgPath), size);
+  alphaMapCache.set(size, alphaMap);
   return alphaMap;
 }
 
-/**
- * 根据图片尺寸检测水印配置
- * @param {number} width - 图片宽度
- * @param {number} height - 图片高度
- * @returns {{ logoSize: number, marginRight: number, marginBottom: number }}
- */
-function detectWatermarkConfig(width, height) {
-  // Gemini 规则：宽高都 > 1024 用 96×96，否则用 48×48
-  if (width > 1024 && height > 1024) {
-    return { logoSize: 96, marginRight: 64, marginBottom: 64 };
-  }
-  return { logoSize: 48, marginRight: 16, marginBottom: 16 };
+async function prepareAlphaMaps() {
+  const alpha48 = await loadBaseAlphaMap(48);
+  const alpha96 = await loadBaseAlphaMap(96);
+
+  const getAlphaMap = (size) => {
+    if (!Number.isFinite(size) || size <= 0) return null;
+    const normalized = Math.round(size);
+    if (alphaMapCache.has(normalized)) {
+      return alphaMapCache.get(normalized);
+    }
+    const interpolated = interpolateAlphaMap(alpha96, 96, normalized);
+    alphaMapCache.set(normalized, interpolated);
+    return interpolated;
+  };
+
+  return { alpha48, alpha96, getAlphaMap };
 }
 
-/**
- * 计算水印在图片中的位置（固定右下角）
- * @param {number} imgWidth
- * @param {number} imgHeight
- * @param {{ logoSize: number, marginRight: number, marginBottom: number }} config
- * @returns {{ x: number, y: number, width: number, height: number }}
- */
-function calculateWatermarkPosition(imgWidth, imgHeight, config) {
-  const { logoSize, marginRight, marginBottom } = config;
+function normalizeExtFromFilePath(filePath) {
+  const ext = String(filePath.match(/\.(\w+)$/)?.[1] || 'png').toLowerCase();
+  if (ext === 'jpg') return 'jpeg';
+  return ext;
+}
+
+function normalizeExtFromMime(mime) {
+  const ext = String(mime || '').split('/')[1] || 'png';
+  if (ext === 'jpg') return 'jpeg';
+  return ext.toLowerCase();
+}
+
+async function decodeToImageData(input) {
+  const { data, info } = await sharp(input)
+    .raw()
+    .ensureAlpha()
+    .toBuffer({ resolveWithObject: true });
+
   return {
-    x: imgWidth - marginRight - logoSize,
-    y: imgHeight - marginBottom - logoSize,
-    width: logoSize,
-    height: logoSize,
+    imageData: {
+      width: info.width,
+      height: info.height,
+      data: new Uint8ClampedArray(data),
+    },
+    info,
   };
 }
 
-/**
- * 对原始像素数据执行反向 Alpha 混合，移除水印
- *
- * @param {Buffer} pixels - RGBA 原始像素 Buffer（会被原地修改）
- * @param {number} imgWidth - 图片宽度
- * @param {Float32Array} alphaMap - Alpha 通道数据
- * @param {{ x: number, y: number, width: number, height: number }} position - 水印位置
- */
-function removeWatermarkPixels(pixels, imgWidth, alphaMap, position) {
-  const { x, y, width, height } = position;
+async function encodeImageData(imageData, ext) {
+  let pipeline = sharp(Buffer.from(imageData.data), {
+    raw: {
+      width: imageData.width,
+      height: imageData.height,
+      channels: 4,
+    },
+  });
 
-  for (let row = 0; row < height; row++) {
-    for (let col = 0; col < width; col++) {
-      const imgIdx = ((y + row) * imgWidth + (x + col)) * 4;
-      const alphaIdx = row * width + col;
-
-      let alpha = alphaMap[alphaIdx];
-
-      // 跳过噪声
-      if (alpha < ALPHA_THRESHOLD) continue;
-
-      // 限制 alpha 避免除零
-      alpha = Math.min(alpha, MAX_ALPHA);
-      const oneMinusAlpha = 1.0 - alpha;
-
-      // 对 R / G / B 三通道分别反向混合
-      for (let c = 0; c < 3; c++) {
-        const watermarked = pixels[imgIdx + c];
-        const original = (watermarked - alpha * LOGO_VALUE) / oneMinusAlpha;
-        pixels[imgIdx + c] = Math.max(0, Math.min(255, Math.round(original)));
-      }
-      // Alpha 通道不动
-    }
+  switch (ext) {
+    case 'jpeg':
+      pipeline = pipeline.jpeg({ quality: 95 });
+      break;
+    case 'webp':
+      pipeline = pipeline.webp({ quality: 95 });
+      break;
+    default:
+      pipeline = pipeline.png();
+      break;
   }
+
+  return pipeline.toBuffer();
 }
 
-/**
- * 移除图片文件中的 Gemini 水印并覆盖保存
- *
- * @param {string} filePath - 图片文件路径（会被原地覆盖）
- * @returns {Promise<{ ok: boolean, width?: number, height?: number, logoSize?: number, error?: string }>}
- */
+async function removeWatermarkFromImageInput(input, { ext }) {
+  const { imageData, info } = await decodeToImageData(input);
+  if (!info.width || !info.height) {
+    return { ok: false, error: 'invalid_image_metadata' };
+  }
+
+  const { alpha48, alpha96, getAlphaMap } = await prepareAlphaMaps();
+  const result = processWatermarkImageData(imageData, {
+    alpha48,
+    alpha96,
+    getAlphaMap,
+    adaptiveMode: 'auto',
+    maxPasses: 4,
+  });
+
+  const meta = result.meta || null;
+  const applied = meta?.applied !== false;
+
+  if (!applied) {
+    return {
+      ok: true,
+      width: info.width,
+      height: info.height,
+      skipped: true,
+      reason: meta?.skipReason || 'no_watermark_detected',
+      meta,
+    };
+  }
+
+  const outputBuffer = await encodeImageData(result.imageData, ext);
+  return {
+    ok: true,
+    width: info.width,
+    height: info.height,
+    logoSize: meta?.size || null,
+    outputBuffer,
+    meta,
+  };
+}
+
 export async function removeWatermarkFromFile(filePath) {
   try {
     console.log(`[watermark-remover] 开始处理: ${filePath}`);
+    const ext = normalizeExtFromFilePath(filePath);
+    const result = await removeWatermarkFromImageInput(filePath, { ext });
 
-    // 1. 读取图片原始像素
-    const image = sharp(filePath);
-    const metadata = await image.metadata();
-    const { width, height } = metadata;
-
-    if (!width || !height) {
-      return { ok: false, error: 'invalid_image_metadata' };
+    if (!result.ok) {
+      return result;
     }
 
-    // 2. 检测水印配置
-    const config = detectWatermarkConfig(width, height);
-    const position = calculateWatermarkPosition(width, height, config);
-
-    // 校验水印位置合法性
-    if (position.x < 0 || position.y < 0) {
-      console.log(`[watermark-remover] 图片太小（${width}×${height}），跳过去水印`);
-      return { ok: true, width, height, skipped: true, reason: 'image_too_small' };
+    if (result.skipped) {
+      console.log(`[watermark-remover] 跳过去水印: ${result.width}×${result.height}, reason=${result.reason}`);
+      return result;
     }
 
-    // 3. 获取 Alpha Map
-    const alphaMap = await getAlphaMap(config.logoSize);
-
-    // 4. 提取原始像素、执行反向混合
-    const { data: pixels, info } = await sharp(filePath)
-      .raw()
-      .ensureAlpha()
-      .toBuffer({ resolveWithObject: true });
-
-    removeWatermarkPixels(pixels, info.width, alphaMap, position);
-
-    // 5. 写回文件（保持原格式）
-    const ext = (filePath.match(/\.(\w+)$/)?.[1] || 'png').toLowerCase();
-    let outputPipeline = sharp(pixels, {
-      raw: { width: info.width, height: info.height, channels: info.channels },
-    });
-
-    switch (ext) {
-      case 'jpg':
-      case 'jpeg':
-        outputPipeline = outputPipeline.jpeg({ quality: 95 });
-        break;
-      case 'webp':
-        outputPipeline = outputPipeline.webp({ quality: 95 });
-        break;
-      default:
-        outputPipeline = outputPipeline.png();
-        break;
-    }
-
-    await outputPipeline.toFile(filePath);
-
-    console.log(`[watermark-remover] ✅ 去水印完成: ${width}×${height}, logo=${config.logoSize}px`);
-    return { ok: true, width, height, logoSize: config.logoSize };
+    await sharp(result.outputBuffer).toFile(filePath);
+    console.log(
+      `[watermark-remover] ✅ 去水印完成: ${result.width}×${result.height}, logo=${result.logoSize}px, tier=${result.meta?.decisionTier || 'unknown'}`
+    );
+    return result;
   } catch (err) {
     console.error(`[watermark-remover] ❌ 去水印失败: ${err.message}`);
     return { ok: false, error: err.message };
   }
 }
 
-/**
- * 移除 base64 图片数据中的 Gemini 水印
- *
- * @param {string} dataUrl - data:image/xxx;base64,... 格式的图片
- * @returns {Promise<{ ok: boolean, dataUrl?: string, width?: number, height?: number, logoSize?: number, error?: string }>}
- */
 export async function removeWatermarkFromDataUrl(dataUrl) {
   try {
     console.log('[watermark-remover] 开始处理 base64 图片');
 
-    // 1. 解析 dataUrl
     const mimeMatch = dataUrl.match(/^data:(image\/\w+);base64,/);
     if (!mimeMatch) {
       return { ok: false, error: 'invalid_data_url' };
     }
+
     const mime = mimeMatch[1];
+    const ext = normalizeExtFromMime(mime);
     const base64Data = dataUrl.slice(mimeMatch[0].length);
     const inputBuffer = Buffer.from(base64Data, 'base64');
+    const result = await removeWatermarkFromImageInput(inputBuffer, { ext });
 
-    // 2. 读取图片信息
-    const metadata = await sharp(inputBuffer).metadata();
-    const { width, height } = metadata;
-
-    if (!width || !height) {
-      return { ok: false, error: 'invalid_image_metadata' };
+    if (!result.ok) {
+      return result;
     }
 
-    // 3. 检测水印配置
-    const config = detectWatermarkConfig(width, height);
-    const position = calculateWatermarkPosition(width, height, config);
-
-    if (position.x < 0 || position.y < 0) {
-      console.log(`[watermark-remover] 图片太小（${width}×${height}），跳过去水印`);
-      return { ok: true, dataUrl, width, height, skipped: true, reason: 'image_too_small' };
+    if (result.skipped) {
+      console.log(`[watermark-remover] 跳过 base64 去水印: ${result.width}×${result.height}, reason=${result.reason}`);
+      return {
+        ...result,
+        dataUrl,
+      };
     }
 
-    // 4. 获取 Alpha Map
-    const alphaMap = await getAlphaMap(config.logoSize);
-
-    // 5. 提取像素、反向混合
-    const { data: pixels, info } = await sharp(inputBuffer)
-      .raw()
-      .ensureAlpha()
-      .toBuffer({ resolveWithObject: true });
-
-    removeWatermarkPixels(pixels, info.width, alphaMap, position);
-
-    // 6. 编码回原格式
-    const ext = mime.split('/')[1];
-    let outputPipeline = sharp(pixels, {
-      raw: { width: info.width, height: info.height, channels: info.channels },
-    });
-
-    switch (ext) {
-      case 'jpeg':
-      case 'jpg':
-        outputPipeline = outputPipeline.jpeg({ quality: 95 });
-        break;
-      case 'webp':
-        outputPipeline = outputPipeline.webp({ quality: 95 });
-        break;
-      default:
-        outputPipeline = outputPipeline.png();
-        break;
-    }
-
-    const outputBuffer = await outputPipeline.toBuffer();
-    const outputBase64 = outputBuffer.toString('base64');
+    const outputBase64 = result.outputBuffer.toString('base64');
     const outputDataUrl = `data:${mime};base64,${outputBase64}`;
+    console.log(
+      `[watermark-remover] ✅ base64 去水印完成: ${result.width}×${result.height}, logo=${result.logoSize}px, tier=${result.meta?.decisionTier || 'unknown'}`
+    );
 
-    console.log(`[watermark-remover] ✅ base64 去水印完成: ${width}×${height}, logo=${config.logoSize}px`);
-    return { ok: true, dataUrl: outputDataUrl, width, height, logoSize: config.logoSize };
+    return {
+      ...result,
+      dataUrl: outputDataUrl,
+    };
   } catch (err) {
     console.error(`[watermark-remover] ❌ base64 去水印失败: ${err.message}`);
     return { ok: false, error: err.message };

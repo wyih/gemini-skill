@@ -1,6 +1,6 @@
 ---
 name: gemini-skill
-description: 通过 Gemini 官网（gemini.google.com）执行生图、对话等操作。用户提到"生图/画图/绘图/nano banana/nanobanana/生成图片"等关键词时触发。操作方式分三级优先级：首选 MCP 工具 → 次选 Skill 脚本 → 最次连接 Skill 浏览器手动操作（需用户授权）。禁止自行启动外部浏览器访问 Gemini。
+description: 通过 Gemini 官网（gemini.google.com）执行生图、对话、图片分析、文件上传后问答等操作。用户明确要求用 Gemini 处理图片、文件或文本，或提到"生图/画图/绘图/nano banana/nanobanana/生成图片"等关键词时触发。操作方式分三级优先级：首选 MCP 工具 → 次选 Skill 脚本 → 最次连接 Skill 浏览器手动操作（需用户授权）。禁止自行启动外部浏览器访问 Gemini。
 ---
 
 # Gemini Skill
@@ -26,18 +26,20 @@ MCP 工具调用（尤其是生图、等待回复等）可能耗时较长（60~1
 - **禁止在未收到工具最终返回前结束对话**或向用户报告"还在运行"/"工具超时"。
 - 每隔 15~30 秒向用户发送一条进度消息（如"正在等待 Gemini 生成图片…已等待 30 秒…"），保持反馈。
 - 拿到最终结果后**立即**回传产物（文件路径）或报告错误，不得遗漏。
+- 若脚本已返回 `MEDIA:`，默认不手动补发；只有确认未成功交付时才补发。
 - 若 `fullSize` 模式失败，可降级重试 `fullSize=false`（预览图模式更稳定）。
 
 ## 触发关键词
 
 - **生图任务**：`生图`、`画`、`绘图`、`海报`、`nano banana`、`nanobanana`、`image generation`、`生成图片`
-- 若请求含糊，先确认用户是否需要生图
+- **Gemini 文件/对话任务**：用户明确点名要用 Gemini 读文件、看图、回答、改写、总结
+- 若请求含糊，先确认用户是否需要生图，还是要用 Gemini 处理文本/文件
 
 ## 使用方式
 
 本 Skill 通过 MCP Server 暴露工具，AI 直接调用即可。
 
-浏览器启动、会话管理、图片提取、文件保存等流程已全部封装在工具内部。
+浏览器启动、会话管理、附件上传、图片提取、文件保存等流程已全部封装在工具内部。
 
 ### ⚠️ 强制规则
 
@@ -74,13 +76,14 @@ MCP 工具调用（尤其是生图、等待回复等）可能耗时较长（60~1
 
 | 工具名 | 说明 | 入参 |
 |--------|------|------|
-| `gemini_send_message` | 发送文本消息并等待回答完成，直接返回 Gemini 的回复文本 | `message`，`timeout`（默认120000ms） |
+| `gemini_send_message` | 发送文本消息并等待回答完成，默认发送前锁到 Pro，也可显式改成 Quick / Think，直接返回 Gemini 的回复文本 | `message`，`timeout`（默认120000ms），`model`（默认`pro`） |
 
-**图片操作：**
+**附件上传 & 图片操作：**
 
 | 工具名 | 说明 | 入参 |
 |--------|------|------|
 | `gemini_upload_images` | 上传图片到输入框（仅上传不发送，可配合 send_message） | `images`（路径数组） |
+| `gemini_upload_files` | 上传文件附件到输入框（仅上传不发送，可配合 send_message） | `files`（路径数组） |
 | `gemini_get_images` | 获取会话中所有已加载图片的元信息 | 无 |
 | `gemini_extract_image` | 提取指定图片的 base64 并保存到本地 | `imageUrl`（从 get_images 获取） |
 | `gemini_download_full_size_image` | 下载完整尺寸的高清图片，默认最新一张，可指定索引 | `index`（可选，从0开始，从旧到新） |
@@ -117,12 +120,17 @@ MCP 工具调用（尤其是生图、等待回复等）可能耗时较长（60~1
 **快速生图（一步到位）：**
 1. 调用 `gemini_generate_image`，传入 prompt → 返回本地图片路径
 
-**灵活组合（细粒度控制）：**
+**灵活组合生图（细粒度控制）：**
 1. `gemini_new_chat` — 新建会话
 2. `gemini_switch_model` → `pro` — 切换到高质量模型
 3. `gemini_upload_images` — 上传参考图
 4. `gemini_send_message` — 发送描述词
 5. `gemini_get_images` → `gemini_extract_image` — 获取并保存图片
+
+**文件问答：**
+1. `gemini_new_chat` — 新建会话
+2. `gemini_upload_files` — 上传 PDF / TXT / Markdown 等附件
+3. `gemini_send_message` — 让 Gemini 总结、提问或改写
 
 **排障：**
 1. `gemini_probe` — 看看页面元素有没有就位

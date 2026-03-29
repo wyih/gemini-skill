@@ -9,7 +9,7 @@ import { createOperator } from './operator.js';
 import { sleep } from './util.js';
 import config from './config.js';
 import { mkdirSync, existsSync } from 'node:fs';
-import { resolve as pathResolve, normalize as pathNormalize } from 'node:path';
+import { resolve as pathResolve, normalize as pathNormalize, basename as pathBasename, extname as pathExtname } from 'node:path';
 import { removeWatermarkFromFile, removeWatermarkFromDataUrl } from './watermark-remover.js';
 
 // ── Gemini 页面元素选择器 ──
@@ -61,7 +61,8 @@ const SELECTORS = {
   /** 模型选项：快速 / Quick */
   modelOptionQuick: [
     '[data-test-id="bard-mode-option-快速"]',        // 中文
-    '[data-test-id="bard-mode-option-quick"]',       // 英文
+    '[data-test-id="bard-mode-option-quick"]',       // 英文旧版
+    '[data-test-id="bard-mode-option-fast"]',        // 英文新版
   ],
   /** 模型选项：思考 / Think */
   modelOptionThink: [
@@ -92,6 +93,25 @@ const SELECTORS = {
     'images-files-uploader',                                  // 标签名兜底
   ],
 };
+
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.avif', '.heic', '.heif']);
+const MODEL_LABEL_ALIASES = {
+  pro: ['pro'],
+  quick: ['quick', 'fast', '快速'],
+  think: ['think', 'thinking', '思考'],
+};
+
+function isImagePath(filePath) {
+  return IMAGE_EXTENSIONS.has(pathExtname(filePath).toLowerCase());
+}
+
+function normalizeModelName(raw = '') {
+  const normalized = String(raw).trim().toLowerCase();
+  for (const [model, aliases] of Object.entries(MODEL_LABEL_ALIASES)) {
+    if (aliases.includes(normalized)) return model;
+  }
+  return normalized;
+}
 
 /**
  * 创建 GeminiOps 操控实例
@@ -179,7 +199,7 @@ export function createOps(page) {
      * @returns {Promise<{ok: boolean, model: string, raw: string, error?: string}>}
      */
     async getCurrentModel() {
-      return op.query((sels) => {
+      const result = await op.query((sels) => {
         let el = null;
         for (const sel of sels) {
           try { el = document.querySelector(sel); } catch { /* skip */ }
@@ -189,8 +209,11 @@ export function createOps(page) {
           return { ok: false, model: '', raw: '', error: 'model_label_not_found' };
         }
         const raw = (el.textContent || '').trim();
-        return { ok: true, model: raw.toLowerCase(), raw };
+        return { ok: true, model: raw, raw };
       }, SELECTORS.modelLabel);
+
+      if (!result.ok) return result;
+      return { ...result, model: normalizeModelName(result.raw) };
     },
 
     /**
@@ -202,6 +225,32 @@ export function createOps(page) {
       const result = await this.getCurrentModel();
       if (!result.ok) return false;
       return result.model === 'pro';
+    },
+
+    /**
+     * 确保当前模型为指定值
+     *
+     * @param {'pro'|'quick'|'think'} model
+     * @returns {Promise<{ok: boolean, switched: boolean, previousModel?: string, error?: string}>}
+     */
+    async ensureModel(model = 'pro') {
+      if (model === 'pro') {
+        return this.ensureModelPro();
+      }
+
+      const current = await this.getCurrentModel();
+      if (current.ok && current.model === model) {
+        console.log(`[ops] model is already ${model}`);
+        return { ok: true, switched: false };
+      }
+
+      console.log(`[ops] model is not ${model}, switching...`);
+      const result = await this.switchToModel(model);
+      if (!result.ok) {
+        return { ok: false, switched: false, error: result.error, previousModel: result.previousModel };
+      }
+
+      return { ok: true, switched: true, previousModel: result.previousModel };
     },
 
     /**
@@ -242,9 +291,34 @@ export function createOps(page) {
       await sleep(250);
 
       // 3. 点击目标模型选项
-      const selectResult = await op.click(targetSels);
+      let selectResult = await op.click(targetSels);
       if (!selectResult.ok) {
-        return { ok: false, error: `model_option_${model}_not_found`, previousModel };
+        const aliases = MODEL_LABEL_ALIASES[model] || [model];
+        const fallbackClicked = await page.evaluate((texts) => {
+          const normalize = (value = '') => String(value)
+            .normalize('NFKC')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+
+          const targets = texts.map(normalize);
+          const candidates = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], button, div, li'));
+          for (const el of candidates) {
+            const text = normalize(el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '');
+            if (!text) continue;
+            if (targets.some(target => text === target || text.includes(target))) {
+              el.click();
+              return true;
+            }
+          }
+          return false;
+        }, aliases);
+
+        if (!fallbackClicked) {
+          return { ok: false, error: `model_option_${model}_not_found`, previousModel };
+        }
+
+        selectResult = { ok: true, fallback: 'text_match' };
       }
 
       // 4. 等待 UI 稳定
@@ -777,7 +851,7 @@ export function createOps(page) {
      * @param {number} [options.timeout=30000] - 下载超时时间（ms）
      * @returns {Promise<{ok: boolean, filePath?: string, suggestedFilename?: string, src?: string, index?: number, total?: number, error?: string}>}
      */
-    async downloadFullSizeImage({ index, timeout = 30_000 } = {}) {
+    async downloadFullSizeImage({ index, timeout = 90_000 } = {}) {
       // 1a. 先将目标图片滚动到屏幕正中间，避免视口外的元素无法交互
       const scrollResult = await op.query((targetIndex) => {
         const imgs = [...document.querySelectorAll('img.image.loaded')];
@@ -988,19 +1062,20 @@ export function createOps(page) {
     },
 
     /**
-     * 上传图片到 Gemini 输入框
+     * 上传附件到 Gemini 输入框
      *
      * 流程：
      *   1. 点击加号面板按钮，展开上传菜单
      *   2. 等待 300ms 让菜单动画稳定
      *   3. 拦截文件选择器 + 点击"上传文件"按钮（Promise.all 并发）
-     *   4. 向文件选择器塞入指定图片路径
-     *   5. 轮询等待图片加载完成（.image-preview.loading 消失）
+     *   4. 向文件选择器塞入指定文件路径
+     *   5. 轮询等待附件出现在输入区
      *
-     * @param {string} filePath - 本地图片的绝对路径
-     * @returns {Promise<{ok: boolean, elapsed?: number, warning?: string, error?: string, detail?: string}>}
+     * @param {string} filePath - 本地文件的绝对路径
+     * @param {{kind?: 'auto'|'image'|'file'}} [opts]
+     * @returns {Promise<{ok: boolean, elapsed?: number, warning?: string, error?: string, detail?: string, kind?: 'image'|'file', fileName?: string}>}
      */
-    async uploadImage(filePath) {
+    async uploadFile(filePath, opts = {}) {
       try {
         // 路径规范化（兼容 Windows 反斜杠、混合斜杠等）
         filePath = pathResolve(pathNormalize(filePath));
@@ -1008,6 +1083,9 @@ export function createOps(page) {
         if (!existsSync(filePath)) {
           return { ok: false, error: 'file_not_found', detail: `文件不存在: ${filePath}` };
         }
+
+        const fileName = pathBasename(filePath);
+        const mode = opts.kind === 'image' ? 'image' : opts.kind === 'file' ? 'file' : (isImagePath(filePath) ? 'image' : 'file');
 
         // 1. 点击加号面板按钮，展开上传菜单
         const panelClick = await this.click('uploadPanelBtn');
@@ -1026,31 +1104,65 @@ export function createOps(page) {
 
         // 4. 弹窗被拦截，塞入文件
         await fileChooser.accept([filePath]);
-        console.log(`[ops] 文件已塞入，等待 Gemini 加载图片...`);
+        console.log(`[ops] 文件已塞入，等待 Gemini 加载${mode === 'image' ? '图片' : '附件'}...`);
 
-        // 5. 等待图片加载完成（.image-preview.loading 消失）
-        const loadTimeout = 15_000;
-        const loadInterval = 500;
-        const loadStart = Date.now();
-        await sleep(500); //  短暂等待 UI 响应
-        while (Date.now() - loadStart < loadTimeout) {
-          const loading = await op.query(() => {
-            const el = document.querySelector('.image-preview.loading');
-            return !!el;
-          });
-          if (!loading) {
-            console.log(`[ops] 图片上传成功 (${Date.now() - loadStart}ms): ${filePath}`);
-            return { ok: true, elapsed: Date.now() - loadStart };
+        // 5. 等待附件显示在输入区
+        const waitResult = await op.waitFor((targetFileName, expectImage) => {
+          const normalize = (value = '') => String(value)
+            .normalize('NFKC')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+
+          const target = normalize(targetFileName);
+          const loadingImage = !!document.querySelector('.image-preview.loading');
+          const readyImage = !!document.querySelector('.image-preview') && !loadingImage;
+          const bodyText = normalize(document.body?.innerText || '');
+          let attrText = '';
+
+          const nodes = document.querySelectorAll('[aria-label],[title],[data-test-id],[mattooltip],[aria-description]');
+          for (const el of nodes) {
+            const chunk = [
+              el.getAttribute('aria-label'),
+              el.getAttribute('title'),
+              el.getAttribute('data-test-id'),
+              el.getAttribute('mattooltip'),
+              el.getAttribute('aria-description'),
+            ].filter(Boolean).join(' ');
+            if (chunk) attrText += ` ${chunk}`;
           }
-          await sleep(loadInterval);
+
+          const matchedByName = target ? (bodyText.includes(target) || normalize(attrText).includes(target)) : false;
+          return expectImage ? (readyImage || matchedByName) : matchedByName;
+        }, { timeout: 15_000, interval: 500, args: [fileName, mode === 'image'] });
+
+        if (waitResult.ok) {
+          console.log(`[ops] ${mode === 'image' ? '图片' : '附件'}上传成功 (${waitResult.elapsed}ms): ${filePath}`);
+          return { ok: true, elapsed: waitResult.elapsed, kind: mode, fileName };
         }
 
         // 超时了但文件已经塞进去了，不算完全失败
-        console.warn(`[ops] 图片加载超时 (${loadTimeout}ms)，但文件已提交`);
-        return { ok: true, warning: 'load_timeout', elapsed: Date.now() - loadStart };
+        console.warn(`[ops] ${mode === 'image' ? '图片' : '附件'}加载超时 (15000ms)，但文件已提交`);
+        return { ok: true, warning: 'load_timeout', elapsed: waitResult.elapsed, kind: mode, fileName };
       } catch (e) {
-        return { ok: false, error: 'upload_image_failed', detail: e.message };
+        return { ok: false, error: 'upload_file_failed', detail: e.message };
       }
+    },
+
+    /**
+     * 上传图片到 Gemini 输入框
+     *
+     * 兼容旧调用，内部复用 uploadFile。
+     *
+     * @param {string} filePath - 本地图片的绝对路径
+     * @returns {Promise<{ok: boolean, elapsed?: number, warning?: string, error?: string, detail?: string, kind?: 'image'|'file', fileName?: string}>}
+     */
+    async uploadImage(filePath) {
+      const result = await this.uploadFile(filePath, { kind: 'image' });
+      if (!result.ok && result.error === 'upload_file_failed') {
+        return { ...result, error: 'upload_image_failed' };
+      }
+      return result;
     },
 
     /**
@@ -1059,11 +1171,17 @@ export function createOps(page) {
      * @param {object} [opts]
      * @param {number} [opts.timeout=120000]
      * @param {number} [opts.interval=8000]
+     * @param {'pro'|'quick'|'think'} [opts.model='pro']
      * @param {(status: object) => void} [opts.onPoll]
      * @returns {Promise<{ok: boolean, elapsed: number, finalStatus?: object, error?: string}>}
      */
     async sendAndWait(prompt, opts = {}) {
-      const { timeout = 120_000, interval = 1_000, onPoll } = opts;
+      const { timeout = 120_000, interval = 1_000, model = 'pro', onPoll } = opts;
+
+      const ensureResult = await this.ensureModel(model);
+      if (!ensureResult.ok) {
+        return { ok: false, error: 'ensure_model_failed', detail: ensureResult, elapsed: 0 };
+      }
 
       // 1. 填写
       const fillResult = await this.fillPrompt(prompt);
