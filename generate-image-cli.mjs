@@ -4,7 +4,6 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { removeWatermarkFromFile } from './src/watermark-remover.js';
 
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(name);
@@ -18,32 +17,6 @@ function hasFlag(name) {
 function fail(message, code = 1) {
   console.error(message);
   process.exit(code);
-}
-
-async function verifyWatermarkFree(filePath, { maxPasses = 2 } = {}) {
-  const target = path.resolve(filePath);
-  const ext = path.extname(target);
-  const base = target.slice(0, target.length - ext.length);
-
-  for (let round = 1; round <= maxPasses; round++) {
-    const probePath = `${base}.wm-verify-${round}${ext}`;
-    fs.copyFileSync(target, probePath);
-
-    const result = await removeWatermarkFromFile(probePath);
-    if (!result?.ok) {
-      fs.rmSync(probePath, { force: true });
-      return { ok: false, error: result?.error || 'verify_failed', round };
-    }
-
-    if (result.skipped) {
-      fs.rmSync(probePath, { force: true });
-      return { ok: true, verified: true, round: round - 1 };
-    }
-
-    fs.renameSync(probePath, target);
-  }
-
-  return { ok: false, error: 'watermark_verification_failed', round: maxPasses };
 }
 
 function extractText(result) {
@@ -143,11 +116,6 @@ try {
   }
 
   if (!fs.existsSync(filePath)) fail(`output file not found: ${filePath}`, 4);
-
-  const verify = await verifyWatermarkFree(filePath);
-  if (!verify.ok) {
-    fail(`watermark verification failed: ${verify.error}`, 6);
-  }
 
   console.log(`MEDIA: ${filePath}`);
 } catch (err) {
